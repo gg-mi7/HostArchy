@@ -153,26 +153,26 @@ cmd_status_human() {
 }
 
 # JSON status output
+# JSON status output
 cmd_status_json() {
     local installed=false
-    local profile=""
-    local version=""
-    local installed_date=""
-    local compat_mode="false"
     
+    # Check if installed and load data
     if [ -f "$HOSTARCHY_ETC/state/installed" ]; then
         installed=true
+        # We don't use 'local' here so the sourced variables actually populate
         source "$HOSTARCHY_ETC/state/installed"
     fi
     
+    # Use the variables directly from the state file
     cat <<EOF | python3 -m json.tool 2>/dev/null || cat
 {
   "hostarchy": {
     "installed": $installed,
-    "version": "$VERSION",
-    "profile": "$profile",
-    "installed_date": "$installed_date",
-    "compatibility_mode": $compat_mode
+    "version": "${VERSION:-unknown}",
+    "profile": "${PROFILE:-none}",
+    "installed_date": "${INSTALLED_DATE:-unknown}",
+    "compatibility_mode": ${COMPAT_MODE:-false}
   },
   "services": {
     "nginx": $(systemctl is-active --quiet nginx && echo true || echo false),

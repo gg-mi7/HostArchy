@@ -68,6 +68,8 @@ prompt_yes_no() {
 
 # Prompt for string input
 # Usage: prompt_string "Question?" "default_value"
+# Prompt for string input
+# Usage: prompt_string "Question?" "default_value"
 prompt_string() {
     local question="$1"
     local default="$2"
@@ -78,7 +80,8 @@ prompt_string() {
         return
     fi
 
-    echo -ne "${CYAN}? $question [$default]: ${NC}"
+    # >&2 sends the text to the screen, NOT the variable
+    echo -ne "${CYAN}? $question [$default]: ${NC}" >&2
     read -r input
     echo "${input:-$default}"
 }

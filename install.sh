@@ -267,12 +267,30 @@ fi
 
 # Save current state
 echo -e "${YELLOW}Saving installation state...${NC}"
-cat > "$HOSTARCHY_ETC/state/installed" <<EOF
-PROFILE=$PROFILE
-INSTALLED_DATE=$(date -Iseconds)
-COMPAT_MODE=$COMPAT_MODE
-VERSION=1.1
-EOF
+# Ensure state directory exists
+mkdir -p "$HOSTARCHY_ETC/state" || {
+    echo -e "${RED}Error: Failed to create state directory${NC}"
+    exit 1
+}
+
+# Write state file with proper error handling
+{
+    echo "PROFILE=$PROFILE"
+    echo "INSTALLED_DATE=$(date -Iseconds)"
+    echo "COMPAT_MODE=$COMPAT_MODE"
+    echo "VERSION=$VERSION"
+} > "$HOSTARCHY_ETC/state/installed" || {
+    echo -e "${RED}Error: Failed to write state file${NC}"
+    exit 1
+}
+
+# Verify file was created and is readable
+if [ ! -f "$HOSTARCHY_ETC/state/installed" ] || [ ! -r "$HOSTARCHY_ETC/state/installed" ]; then
+    echo -e "${RED}Error: State file was not created or is not readable${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✓ Installation state saved${NC}"
 
 echo -e "${GREEN}✓ HostArchy installation completed successfully!${NC}"
 echo -e "${GREEN}Profile: $PROFILE${NC}"

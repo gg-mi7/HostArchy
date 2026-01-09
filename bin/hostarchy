@@ -493,7 +493,12 @@ cmd_run() {
         py|python)
             detect_and_install_python "$file_dir"
             echo -e "${YELLOW}Running Python file...${NC}"
-            python3 "$file_path"
+            # Use Python command from detection (venv or system)
+            if [ -n "$HOSTARCHY_PYTHON_CMD" ]; then
+                $HOSTARCHY_PYTHON_CMD "$file_path"
+            else
+                python3 "$file_path"
+            fi
             ;;
         js|mjs)
             detect_and_install_nodejs "$file_dir"
@@ -533,7 +538,12 @@ cmd_run() {
                     *python*)
                         detect_and_install_python "$file_dir"
                         echo -e "${YELLOW}Running as Python script...${NC}"
-                        python3 "$file_path"
+                        # Use Python command from detection (venv or system)
+                        if [ -n "$HOSTARCHY_PYTHON_CMD" ]; then
+                            $HOSTARCHY_PYTHON_CMD "$file_path"
+                        else
+                            python3 "$file_path"
+                        fi
                         ;;
                     #!/usr/bin/env\ node|#!/usr/bin/node)
                     *node*)
@@ -557,9 +567,82 @@ cmd_run() {
     esac
 }
 
+# Detect and activate virtual environment
+detect_and_activate_venv() {
+    local dir="$1"
+    local venv_path=""
+    
+    # Check for common virtual environment directory names (in order of preference)
+    for venv_name in ".venv" "venv" "env" ".env" "virtualenv"; do
+        if [ -d "$dir/$venv_name" ] && [ -f "$dir/$venv_name/bin/activate" ]; then
+            venv_path="$dir/$venv_name"
+            break
+        fi
+    done
+    
+    if [ -n "$venv_path" ]; then
+        echo -e "${GREEN}Found virtual environment: $venv_path${NC}"
+        echo -e "${YELLOW}Activating virtual environment...${NC}"
+        
+        # Activate the virtual environment
+        # This modifies PATH and other environment variables in the current shell
+        source "$venv_path/bin/activate" 2>/dev/null
+        
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✓ Virtual environment activated${NC}"
+            # Verify activation worked by checking if python points to venv
+            if command -v python &>/dev/null; then
+                local active_python=$(which python 2>/dev/null || command -v python)
+                if [[ "$active_python" == "$venv_path/bin/python"* ]] || [[ "$active_python" == *"$venv_path/bin/python" ]]; then
+                    echo -e "${GREEN}  Using Python: $active_python${NC}"
+                else
+                    echo -e "${YELLOW}  Using Python: $active_python${NC}"
+                fi
+            fi
+            return 0
+        else
+            echo -e "${RED}✗ Failed to activate virtual environment${NC}"
+            return 1
+        fi
+    else
+        # Check if user wants to create a virtual environment
+        if [ -f "$dir/requirements.txt" ] || [ -f "$dir/requirements.py" ] || [ -f "$dir/setup.py" ] || [ -f "$dir/pyproject.toml" ]; then
+            echo -e "${YELLOW}No virtual environment found in $dir${NC}"
+            echo -n "Do you want to create a virtual environment (.venv)? (y/N): "
+            read -r create_venv
+            
+            if [[ "$create_venv" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}Creating virtual environment...${NC}"
+                
+                # Check if venv module is available
+                if python3 -m venv --help &>/dev/null; then
+                    python3 -m venv "$dir/.venv"
+                    if [ $? -eq 0 ]; then
+                        echo -e "${GREEN}✓ Virtual environment created${NC}"
+                        source "$dir/.venv/bin/activate"
+                        echo -e "${GREEN}✓ Virtual environment activated${NC}"
+                        
+                        # Upgrade pip
+                        pip install --upgrade pip &>/dev/null || true
+                        return 0
+                    else
+                        echo -e "${RED}✗ Failed to create virtual environment${NC}"
+                        return 1
+                    fi
+                else
+                    echo -e "${RED}Error: venv module not available${NC}"
+                    return 1
+                fi
+            fi
+        fi
+        return 1
+    fi
+}
+
 # Detect and install Python dependencies
 detect_and_install_python() {
     local dir="$1"
+    local use_venv=false
     
     # Check if Python is installed
     if ! command -v python3 &> /dev/null; then
@@ -588,6 +671,51 @@ detect_and_install_python() {
         fi
     fi
     
+    # Try to detect and activate virtual environment
+    if detect_and_activate_venv "$dir"; then
+        use_venv=true
+        # When using venv, 'python' and 'pip' commands should be in PATH from activation
+        # Check if they're available (should be after activation)
+        if command -v python &>/dev/null; then
+            python_cmd="python"
+        else
+            python_cmd="python3"
+        fi
+        
+        if command -v pip &>/dev/null; then
+            pip_cmd="pip"
+        else
+            pip_cmd="pip3"
+        fi
+    else
+        use_venv=false
+        # Check if pip is available
+        if ! command -v pip3 &> /dev/null && ! python3 -m pip --version &> /dev/null; then
+            echo -e "${YELLOW}Installing pip...${NC}"
+            if [ "$EUID" -eq 0 ]; then
+                pacman -Sy --noconfirm python-pip 2>/dev/null || {
+                    echo -e "${YELLOW}Downloading get-pip.py...${NC}"
+                    curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+                    python3 /tmp/get-pip.py
+                }
+            else
+                echo -e "${YELLOW}Downloading get-pip.py...${NC}"
+                curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+                python3 /tmp/get-pip.py --user
+            fi
+        fi
+        
+        # Determine pip command
+        if command -v pip3 &> /dev/null; then
+            pip_cmd="pip3"
+        elif python3 -m pip --version &>/dev/null; then
+            pip_cmd="python3 -m pip"
+        else
+            pip_cmd="pip3"
+        fi
+        python_cmd="python3"
+    fi
+    
     # Check for requirements.txt
     if [ -f "$dir/requirements.txt" ]; then
         echo -e "${YELLOW}Found requirements.txt${NC}"
@@ -597,21 +725,15 @@ detect_and_install_python() {
         if [[ "$install_deps" =~ ^[Yy]$ ]]; then
             echo -e "${YELLOW}Installing dependencies...${NC}"
             
-            # Check if pip is available
-            if ! command -v pip3 &> /dev/null && ! python3 -m pip --version &> /dev/null; then
-                echo -e "${YELLOW}Installing pip...${NC}"
-                pacman -Sy --noconfirm python-pip 2>/dev/null || {
-                    echo -e "${YELLOW}Downloading get-pip.py...${NC}"
-                    curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-                    python3 /tmp/get-pip.py
-                }
-            fi
-            
-            # Install requirements
-            if command -v pip3 &> /dev/null; then
-                pip3 install -r "$dir/requirements.txt" --user
+            # Install requirements (in venv if active, otherwise with --user)
+            if [ "$use_venv" = true ]; then
+                $pip_cmd install -r "$dir/requirements.txt"
             else
-                python3 -m pip install -r "$dir/requirements.txt" --user
+                if command -v "$pip_cmd" &> /dev/null; then
+                    $pip_cmd install -r "$dir/requirements.txt" --user
+                else
+                    python3 -m pip install -r "$dir/requirements.txt" --user
+                fi
             fi
             
             if [ $? -eq 0 ]; then
@@ -631,26 +753,31 @@ detect_and_install_python() {
         if [[ "$install_deps" =~ ^[Yy]$ ]]; then
             echo -e "${YELLOW}Installing dependencies from requirements.py...${NC}"
             
-            if ! command -v pip3 &> /dev/null && ! python3 -m pip --version &> /dev/null; then
-                pacman -Sy --noconfirm python-pip 2>/dev/null || {
-                    curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-                    python3 /tmp/get-pip.py
-                }
-            fi
-            
             # Try to run requirements.py and pipe output to pip (if it generates requirements)
             # Otherwise try to install it directly as if it were a requirements file
-            python3 "$dir/requirements.py" 2>/dev/null | pip3 install -r /dev/stdin --user 2>/dev/null || \
-            pip3 install -r "$dir/requirements.py" --user 2>/dev/null || {
-                echo -e "${YELLOW}Warning: Could not auto-install from requirements.py${NC}"
-                echo -e "${YELLOW}Please ensure requirements.py is either a valid requirements file or outputs package names when run${NC}"
-            }
+            if [ "$use_venv" = true ]; then
+                $python_cmd "$dir/requirements.py" 2>/dev/null | $pip_cmd install -r /dev/stdin 2>/dev/null || \
+                $pip_cmd install -r "$dir/requirements.py" 2>/dev/null || {
+                    echo -e "${YELLOW}Warning: Could not auto-install from requirements.py${NC}"
+                    echo -e "${YELLOW}Please ensure requirements.py is either a valid requirements file or outputs package names when run${NC}"
+                }
+            else
+                python3 "$dir/requirements.py" 2>/dev/null | $pip_cmd install -r /dev/stdin --user 2>/dev/null || \
+                $pip_cmd install -r "$dir/requirements.py" --user 2>/dev/null || {
+                    echo -e "${YELLOW}Warning: Could not auto-install from requirements.py${NC}"
+                    echo -e "${YELLOW}Please ensure requirements.py is either a valid requirements file or outputs package names when run${NC}"
+                }
+            fi
             
             if [ ${PIPESTATUS[0]} -eq 0 ] || [ $? -eq 0 ]; then
                 echo -e "${GREEN}✓ Dependencies installed${NC}"
             fi
         fi
     fi
+    
+    # Export Python command to use (venv or system)
+    export HOSTARCHY_PYTHON_CMD="$python_cmd"
+    export HOSTARCHY_USE_VENV="$use_venv"
 }
 
 # Detect and install Node.js dependencies

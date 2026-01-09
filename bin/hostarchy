@@ -620,6 +620,8 @@ detect_and_install_python() {
                 echo -e "${RED}✗ Failed to install some dependencies${NC}"
             fi
         fi
+    fi
+    
     # Also check for requirements.py (as specified by user)
     if [ -f "$dir/requirements.py" ]; then
         echo -e "${YELLOW}Found requirements.py${NC}"

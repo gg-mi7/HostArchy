@@ -13,7 +13,7 @@ This guide walks you through installing and configuring HostArchy on a fresh Arc
 
 ```bash
 # Clone HostArchy repository
-git clone https://github.com/hostarchy/hostarchy.git /usr/local/hostarchy
+git clone https://github.com/gg-mi7/hostarchy.git /usr/local/hostarchy
 
 # Enter directory
 cd /usr/local/hostarchy
@@ -32,7 +32,7 @@ sudo ./install.sh --profile=hosting
 Clone the HostArchy repository to `/usr/local/hostarchy`:
 
 ```bash
-git clone https://github.com/hostarchy/hostarchy.git /usr/local/hostarchy
+git clone https://github.com/gg-mi7/hostarchy.git /usr/local/hostarchy
 ```
 
 If the repository is already cloned elsewhere, you can copy it:

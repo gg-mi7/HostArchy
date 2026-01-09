@@ -1,0 +1,15 @@
+[Trigger]
+Type = Package
+Operation = Upgrade
+Target = nginx
+Target = php
+Target = php-fpm
+Target = php*
+Target = linux
+
+[Action]
+Description = Re-applying HostArchy configuration after package update...
+When = PostTransaction
+Exec = /usr/local/bin/hostarchy apply
+Depends = hostarchy
+

@@ -1,0 +1,36 @@
+# HostArchy .gitignore
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor directories
+.idea/
+.vscode/
+*.sublime-*
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.backup
+
+# Installation state (should not be in repo)
+/etc/hostarchy/state/
+
+# Build artifacts
+*.o
+*.so
+*.a
+
+# Test files
+*.test
+test_*
+
+# Local configuration overrides
+*.local
+local.conf
+

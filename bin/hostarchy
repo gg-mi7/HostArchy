@@ -1,0 +1,916 @@
+#!/bin/bash
+# HostArchy CLI Tool
+# Main command-line interface for HostArchy management
+
+set -euo pipefail
+
+HOSTARCHY_DIR="/usr/local/hostarchy"
+HOSTARCHY_ETC="/etc/hostarchy"
+VERSION="1.1"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Load common functions
+if [ -f "$HOSTARCHY_DIR/lib/common.sh" ]; then
+    source "$HOSTARCHY_DIR/lib/common.sh"
+fi
+
+# Print usage
+usage() {
+    cat <<EOF
+HostArchy CLI v${VERSION}
+
+Usage: hostarchy <command> [options]
+
+Commands:
+    status          Show current HostArchy status
+    profile         Show or set active profile
+    check           Run pre-flight checks
+    apply           Re-apply HostArchy configuration
+    git-clone       Clone/pull a git repository into /srv
+    run             Run a backend application in /srv
+    version         Show version information
+
+Options:
+    --json          Output in JSON format (for status command)
+    --profile=NAME  Set active profile (hosting|performance|database)
+
+Examples:
+    hostarchy status
+    hostarchy status --json
+    hostarchy profile
+    hostarchy profile --profile=performance
+    hostarchy check
+    hostarchy apply
+    hostarchy git-clone
+    hostarchy run
+EOF
+}
+
+# Status command
+cmd_status() {
+    local json_mode=false
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --json)
+                json_mode=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    if [ "$json_mode" = true ]; then
+        cmd_status_json
+    else
+        cmd_status_human
+    fi
+}
+
+# Human-readable status
+cmd_status_human() {
+    echo -e "${BLUE}HostArchy Status${NC}"
+    echo "=================="
+    
+    if [ -f "$HOSTARCHY_ETC/state/installed" ]; then
+        source "$HOSTARCHY_ETC/state/installed"
+        echo -e "${GREEN}✓ HostArchy is installed${NC}"
+        echo "  Profile: $PROFILE"
+        echo "  Version: $VERSION"
+        echo "  Installed: $INSTALLED_DATE"
+        echo "  Compatibility Mode: $COMPAT_MODE"
+    else
+        echo -e "${RED}✗ HostArchy is not installed${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo "Services:"
+    
+    # Check services
+    if systemctl is-active --quiet nginx; then
+        echo -e "  ${GREEN}✓${NC} Nginx: Active"
+    else
+        echo -e "  ${RED}✗${NC} Nginx: Inactive"
+    fi
+    
+    if systemctl is-active --quiet php-fpm; then
+        echo -e "  ${GREEN}✓${NC} PHP-FPM: Active"
+    else
+        echo -e "  ${RED}✗${NC} PHP-FPM: Inactive"
+    fi
+    
+    if systemctl is-active --quiet mariadb; then
+        echo -e "  ${GREEN}✓${NC} MariaDB: Active"
+    elif systemctl is-active --quiet postgresql; then
+        echo -e "  ${GREEN}✓${NC} PostgreSQL: Active"
+    else
+        echo -e "  ${YELLOW}○${NC} Database: Not active"
+    fi
+    
+    if systemctl is-active --quiet redis; then
+        echo -e "  ${GREEN}✓${NC} Redis: Active"
+    else
+        echo -e "  ${YELLOW}○${NC} Redis: Inactive"
+    fi
+    
+    if systemctl is-active --quiet fail2ban; then
+        echo -e "  ${GREEN}✓${NC} Fail2Ban: Active"
+    else
+        echo -e "  ${RED}✗${NC} Fail2Ban: Inactive"
+    fi
+    
+    echo ""
+    echo "System Tuning:"
+    if [ -f /etc/sysctl.d/99-hostarchy.conf ]; then
+        echo -e "  ${GREEN}✓${NC} Sysctl configuration applied"
+    else
+        echo -e "  ${RED}✗${NC} Sysctl configuration missing"
+    fi
+    
+    echo ""
+    echo "Mounts:"
+    if mountpoint -q /srv 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} /srv: Mounted"
+    else
+        echo -e "  ${YELLOW}○${NC} /srv: Not mounted (using compatibility mode)"
+    fi
+    
+    if mountpoint -q /db 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} /db: Mounted"
+    else
+        echo -e "  ${YELLOW}○${NC} /db: Not mounted (using compatibility mode)"
+    fi
+}
+
+# JSON status output
+cmd_status_json() {
+    local installed=false
+    local profile=""
+    local version=""
+    local installed_date=""
+    local compat_mode="false"
+    
+    if [ -f "$HOSTARCHY_ETC/state/installed" ]; then
+        installed=true
+        source "$HOSTARCHY_ETC/state/installed"
+    fi
+    
+    cat <<EOF | python3 -m json.tool 2>/dev/null || cat
+{
+  "hostarchy": {
+    "installed": $installed,
+    "version": "$VERSION",
+    "profile": "$profile",
+    "installed_date": "$installed_date",
+    "compatibility_mode": $compat_mode
+  },
+  "services": {
+    "nginx": $(systemctl is-active --quiet nginx && echo true || echo false),
+    "php-fpm": $(systemctl is-active --quiet php-fpm && echo true || echo false),
+    "mariadb": $(systemctl is-active --quiet mariadb && echo true || echo false),
+    "postgresql": $(systemctl is-active --quiet postgresql && echo true || echo false),
+    "redis": $(systemctl is-active --quiet redis && echo true || echo false),
+    "fail2ban": $(systemctl is-active --quiet fail2ban && echo true || echo false)
+  },
+  "mounts": {
+    "/srv": $(mountpoint -q /srv 2>/dev/null && echo true || echo false),
+    "/db": $(mountpoint -q /db 2>/dev/null && echo true || echo false)
+  },
+  "system_tuning": {
+    "sysctl": $( [ -f /etc/sysctl.d/99-hostarchy.conf ] && echo true || echo false )
+  }
+}
+EOF
+}
+
+# Profile command
+cmd_profile() {
+    local new_profile=""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --profile=*)
+                new_profile="${1#*=}"
+                shift
+                ;;
+            --profile)
+                new_profile="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -n "$new_profile" ]; then
+        # Set new profile
+        case $new_profile in
+            hosting|performance|database)
+                if [ ! -f "$HOSTARCHY_ETC/state/installed" ]; then
+                    echo -e "${RED}Error: HostArchy is not installed${NC}"
+                    exit 1
+                fi
+                
+                # Update profile
+                sed -i "s/^PROFILE=.*/PROFILE=$new_profile/" "$HOSTARCHY_ETC/state/installed"
+                
+                # Re-apply profile
+                if [ -f "$HOSTARCHY_DIR/profiles/$new_profile.sh" ]; then
+                    source "$HOSTARCHY_DIR/profiles/$new_profile.sh"
+                    apply_profile
+                fi
+                
+                echo -e "${GREEN}Profile changed to: $new_profile${NC}"
+                echo "Run 'hostarchy apply' to fully apply changes"
+                ;;
+            *)
+                echo -e "${RED}Invalid profile: $new_profile${NC}"
+                echo "Valid profiles: hosting, performance, database"
+                exit 1
+                ;;
+        esac
+    else
+        # Show current profile
+        if [ -f "$HOSTARCHY_ETC/state/installed" ]; then
+            source "$HOSTARCHY_ETC/state/installed"
+            echo "Current profile: $PROFILE"
+        else
+            echo -e "${RED}HostArchy is not installed${NC}"
+            exit 1
+        fi
+    fi
+}
+
+# Check command
+cmd_check() {
+    echo -e "${BLUE}Running pre-flight checks...${NC}"
+    local errors=0
+    
+    # Check Arch Linux
+    if [ ! -f /etc/arch-release ]; then
+        echo -e "${RED}✗ Not running on Arch Linux${NC}"
+        ((errors++))
+    else
+        echo -e "${GREEN}✓ Arch Linux detected${NC}"
+    fi
+    
+    # Check mounts
+    if mountpoint -q /srv 2>/dev/null; then
+        echo -e "${GREEN}✓ /srv is mounted${NC}"
+    else
+        echo -e "${YELLOW}○ /srv is not mounted (compatibility mode)${NC}"
+    fi
+    
+    if mountpoint -q /db 2>/dev/null; then
+        echo -e "${GREEN}✓ /db is mounted${NC}"
+    else
+        echo -e "${YELLOW}○ /db is not mounted (compatibility mode)${NC}"
+    fi
+    
+    # Check internet
+    if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ Internet connectivity${NC}"
+    else
+        echo -e "${RED}✗ No internet connectivity${NC}"
+        ((errors++))
+    fi
+    
+    # Check HostArchy installation
+    if [ -f "$HOSTARCHY_ETC/state/installed" ]; then
+        echo -e "${GREEN}✓ HostArchy is installed${NC}"
+    else
+        echo -e "${YELLOW}○ HostArchy is not installed${NC}"
+    fi
+    
+    if [ $errors -eq 0 ]; then
+        echo -e "${GREEN}All checks passed${NC}"
+        return 0
+    else
+        echo -e "${RED}$errors error(s) found${NC}"
+        return 1
+    fi
+}
+
+# Apply command
+cmd_apply() {
+    echo -e "${BLUE}Re-applying HostArchy configuration...${NC}"
+    
+    if [ ! -f "$HOSTARCHY_ETC/state/installed" ]; then
+        echo -e "${RED}Error: HostArchy is not installed${NC}"
+        exit 1
+    fi
+    
+    source "$HOSTARCHY_ETC/state/installed"
+    
+    # Re-apply system tuning
+    if [ -f "$HOSTARCHY_DIR/lib/system-tuning.sh" ]; then
+        source "$HOSTARCHY_DIR/lib/system-tuning.sh"
+        apply_system_tuning
+        echo -e "${GREEN}✓ System tuning reapplied${NC}"
+    fi
+    
+    # Re-apply service configuration
+    if [ -f "$HOSTARCHY_DIR/lib/service-config.sh" ]; then
+        source "$HOSTARCHY_DIR/lib/service-config.sh"
+        configure_services "$PROFILE"
+        echo -e "${GREEN}✓ Services reconfigured${NC}"
+    fi
+    
+    # Re-apply profile
+    if [ -f "$HOSTARCHY_DIR/profiles/$PROFILE.sh" ]; then
+        source "$HOSTARCHY_DIR/profiles/$PROFILE.sh"
+        apply_profile
+        echo -e "${GREEN}✓ Profile reapplied${NC}"
+    fi
+    
+    echo -e "${GREEN}Configuration reapplied successfully${NC}"
+}
+
+# Version command
+cmd_version() {
+    echo "HostArchy CLI v${VERSION}"
+}
+
+# Git clone command
+cmd_git_clone() {
+    echo -e "${BLUE}Git Clone to /srv${NC}"
+    echo "======================"
+    
+    # Check if /srv exists
+    if [ ! -d /srv ]; then
+        echo -e "${RED}Error: /srv directory does not exist${NC}"
+        exit 1
+    fi
+    
+    # Ask for git URL
+    echo -n "Enter git repository URL: "
+    read -r git_url
+    
+    if [ -z "$git_url" ]; then
+        echo -e "${RED}Error: Git URL cannot be empty${NC}"
+        exit 1
+    fi
+    
+    # Extract repository name from URL for default directory name
+    repo_name=$(basename "$git_url" .git)
+    if [[ "$repo_name" == *"/"* ]]; then
+        repo_name=$(basename "$repo_name")
+    fi
+    
+    # Ask for destination directory
+    echo -n "Enter destination directory name (default: $repo_name): "
+    read -r dest_dir
+    
+    if [ -z "$dest_dir" ]; then
+        dest_dir="$repo_name"
+    fi
+    
+    # Full path
+    full_path="/srv/$dest_dir"
+    
+    # Check if directory already exists
+    if [ -d "$full_path" ]; then
+        echo -e "${YELLOW}Directory $full_path already exists${NC}"
+        echo -n "Do you want to pull latest changes? (y/N): "
+        read -r pull_choice
+        
+        if [[ "$pull_choice" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Pulling latest changes...${NC}"
+            cd "$full_path"
+            
+            if [ -d .git ]; then
+                git pull
+                if [ $? -eq 0 ]; then
+                    echo -e "${GREEN}✓ Repository updated successfully${NC}"
+                else
+                    echo -e "${RED}✗ Failed to pull changes${NC}"
+                    exit 1
+                fi
+            else
+                echo -e "${RED}Error: $full_path is not a git repository${NC}"
+                exit 1
+            fi
+        else
+            echo "Aborted."
+            exit 0
+        fi
+    else
+        # Clone repository
+        echo -e "${YELLOW}Cloning repository to $full_path...${NC}"
+        
+        if git clone "$git_url" "$full_path"; then
+            echo -e "${GREEN}✓ Repository cloned successfully to $full_path${NC}"
+        else
+            echo -e "${RED}✗ Failed to clone repository${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Set appropriate permissions
+    if [ -d "$full_path" ]; then
+        # Make sure it's readable
+        chmod -R u+rwX,go+rX "$full_path" 2>/dev/null || true
+        echo -e "${GREEN}✓ Permissions set${NC}"
+    fi
+    
+    echo -e "${GREEN}Done! Repository is available at: $full_path${NC}"
+}
+
+# Run backend command
+cmd_run() {
+    echo -e "${BLUE}Run Backend Application${NC}"
+    echo "======================="
+    
+    # Check if /srv exists
+    if [ ! -d /srv ]; then
+        echo -e "${RED}Error: /srv directory does not exist${NC}"
+        exit 1
+    fi
+    
+    # Ask for file to run
+    echo -n "Enter the file name to run: "
+    read -r file_name
+    
+    if [ -z "$file_name" ]; then
+        echo -e "${RED}Error: File name cannot be empty${NC}"
+        exit 1
+    fi
+    
+    # Ask for directory (if not just filename)
+    if [[ "$file_name" == *"/"* ]]; then
+        # User provided a path
+        file_path="$file_name"
+    else
+        # Search for file in /srv
+        echo -n "Enter directory in /srv (or press Enter to search in /srv): "
+        read -r search_dir
+        
+        if [ -z "$search_dir" ]; then
+            # Search recursively in /srv
+            file_path=$(find /srv -name "$file_name" -type f 2>/dev/null | head -n 1)
+            
+            if [ -z "$file_path" ]; then
+                echo -e "${RED}Error: File '$file_name' not found in /srv${NC}"
+                exit 1
+            fi
+            
+            echo -e "${YELLOW}Found file at: $file_path${NC}"
+        else
+            file_path="/srv/$search_dir/$file_name"
+        fi
+    fi
+    
+    # Check if file exists
+    if [ ! -f "$file_path" ]; then
+        echo -e "${RED}Error: File not found: $file_path${NC}"
+        exit 1
+    fi
+    
+    # Get file extension
+    file_ext="${file_path##*.}"
+    file_dir=$(dirname "$file_path")
+    
+    # Change to file directory
+    cd "$file_dir" || exit 1
+    
+    echo -e "${GREEN}Working directory: $file_dir${NC}"
+    echo -e "${GREEN}File: $file_path${NC}"
+    
+    # Detect file type and handle dependencies
+    case "$file_ext" in
+        py|python)
+            detect_and_install_python "$file_dir"
+            echo -e "${YELLOW}Running Python file...${NC}"
+            python3 "$file_path"
+            ;;
+        js|mjs)
+            detect_and_install_nodejs "$file_dir"
+            echo -e "${YELLOW}Running Node.js file...${NC}"
+            node "$file_path"
+            ;;
+        rb)
+            detect_and_install_ruby "$file_dir"
+            echo -e "${YELLOW}Running Ruby file...${NC}"
+            ruby "$file_path"
+            ;;
+        go)
+            detect_and_install_go "$file_dir"
+            echo -e "${YELLOW}Running Go file...${NC}"
+            go run "$file_path"
+            ;;
+        rs)
+            detect_and_install_rust "$file_dir"
+            echo -e "${YELLOW}Running Rust file...${NC}"
+            cargo run --manifest-path "$file_dir/Cargo.toml" 2>/dev/null || rustc "$file_path" && ./"${file_path%.*}"
+            ;;
+        pl)
+            detect_and_install_perl "$file_dir"
+            echo -e "${YELLOW}Running Perl file...${NC}"
+            perl "$file_path"
+            ;;
+        sh|bash)
+            echo -e "${YELLOW}Running shell script...${NC}"
+            bash "$file_path"
+            ;;
+        *)
+            # Try to detect shebang
+            if [ -r "$file_path" ]; then
+                shebang=$(head -n 1 "$file_path")
+                case "$shebang" in
+                    #!/usr/bin/env\ python*|#!/usr/bin/python*)
+                    *python*)
+                        detect_and_install_python "$file_dir"
+                        echo -e "${YELLOW}Running as Python script...${NC}"
+                        python3 "$file_path"
+                        ;;
+                    #!/usr/bin/env\ node|#!/usr/bin/node)
+                    *node*)
+                        detect_and_install_nodejs "$file_dir"
+                        echo -e "${YELLOW}Running as Node.js script...${NC}"
+                        node "$file_path"
+                        ;;
+                    *)
+                        # Try to execute directly
+                        echo -e "${YELLOW}Attempting to execute file...${NC}"
+                        chmod +x "$file_path"
+                        "$file_path"
+                        ;;
+                esac
+            else
+                echo -e "${RED}Error: Cannot determine how to run this file${NC}"
+                echo "Supported extensions: .py, .js, .rb, .go, .rs, .pl, .sh, .bash"
+                exit 1
+            fi
+            ;;
+    esac
+}
+
+# Detect and install Python dependencies
+detect_and_install_python() {
+    local dir="$1"
+    
+    # Check if Python is installed
+    if ! command -v python3 &> /dev/null; then
+        echo -e "${YELLOW}Python3 is not installed${NC}"
+        
+        # Check for root privileges
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${RED}Error: Root privileges required to install Python${NC}"
+            echo "Please run: sudo pacman -S python python-pip"
+            exit 1
+        fi
+        
+        echo -n "Do you want to install Python? (y/N): "
+        read -r install_choice
+        
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Installing Python...${NC}"
+            pacman -Sy --noconfirm python python-pip 2>/dev/null || {
+                echo -e "${RED}Error: Failed to install Python. Please install manually.${NC}"
+                exit 1
+            }
+            echo -e "${GREEN}✓ Python installed${NC}"
+        else
+            echo -e "${RED}Python is required to run this file${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Check for requirements.txt
+    if [ -f "$dir/requirements.txt" ]; then
+        echo -e "${YELLOW}Found requirements.txt${NC}"
+        echo -n "Do you want to install Python dependencies from requirements.txt? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Installing dependencies...${NC}"
+            
+            # Check if pip is available
+            if ! command -v pip3 &> /dev/null && ! python3 -m pip --version &> /dev/null; then
+                echo -e "${YELLOW}Installing pip...${NC}"
+                pacman -Sy --noconfirm python-pip 2>/dev/null || {
+                    echo -e "${YELLOW}Downloading get-pip.py...${NC}"
+                    curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+                    python3 /tmp/get-pip.py
+                }
+            fi
+            
+            # Install requirements
+            if command -v pip3 &> /dev/null; then
+                pip3 install -r "$dir/requirements.txt" --user
+            else
+                python3 -m pip install -r "$dir/requirements.txt" --user
+            fi
+            
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✓ Dependencies installed${NC}"
+            else
+                echo -e "${RED}✗ Failed to install some dependencies${NC}"
+            fi
+        fi
+    # Also check for requirements.py (as specified by user)
+    if [ -f "$dir/requirements.py" ]; then
+        echo -e "${YELLOW}Found requirements.py${NC}"
+        echo -n "Do you want to install Python dependencies from requirements.py? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Installing dependencies from requirements.py...${NC}"
+            
+            if ! command -v pip3 &> /dev/null && ! python3 -m pip --version &> /dev/null; then
+                pacman -Sy --noconfirm python-pip 2>/dev/null || {
+                    curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+                    python3 /tmp/get-pip.py
+                }
+            fi
+            
+            # Try to run requirements.py and pipe output to pip (if it generates requirements)
+            # Otherwise try to install it directly as if it were a requirements file
+            python3 "$dir/requirements.py" 2>/dev/null | pip3 install -r /dev/stdin --user 2>/dev/null || \
+            pip3 install -r "$dir/requirements.py" --user 2>/dev/null || {
+                echo -e "${YELLOW}Warning: Could not auto-install from requirements.py${NC}"
+                echo -e "${YELLOW}Please ensure requirements.py is either a valid requirements file or outputs package names when run${NC}"
+            }
+            
+            if [ ${PIPESTATUS[0]} -eq 0 ] || [ $? -eq 0 ]; then
+                echo -e "${GREEN}✓ Dependencies installed${NC}"
+            fi
+        fi
+    fi
+}
+
+# Detect and install Node.js dependencies
+detect_and_install_nodejs() {
+    local dir="$1"
+    
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        echo -e "${YELLOW}Node.js is not installed${NC}"
+        
+        # Check for root privileges
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${RED}Error: Root privileges required to install Node.js${NC}"
+            echo "Please run: sudo pacman -S nodejs npm"
+            exit 1
+        fi
+        
+        echo -n "Do you want to install Node.js? (y/N): "
+        read -r install_choice
+        
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Installing Node.js...${NC}"
+            pacman -Sy --noconfirm nodejs npm 2>/dev/null || {
+                echo -e "${RED}Error: Failed to install Node.js. Please install manually.${NC}"
+                exit 1
+            }
+            echo -e "${GREEN}✓ Node.js installed${NC}"
+        else
+            echo -e "${RED}Node.js is required to run this file${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Check for package.json
+    if [ -f "$dir/package.json" ]; then
+        echo -e "${YELLOW}Found package.json${NC}"
+        echo -n "Do you want to install Node.js dependencies? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Installing dependencies...${NC}"
+            npm install --prefix "$dir"
+            
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✓ Dependencies installed${NC}"
+            else
+                echo -e "${RED}✗ Failed to install some dependencies${NC}"
+            fi
+        fi
+    fi
+}
+
+# Detect and install Ruby dependencies
+detect_and_install_ruby() {
+    local dir="$1"
+    
+    if ! command -v ruby &> /dev/null; then
+        echo -e "${YELLOW}Ruby is not installed${NC}"
+        
+        # Check for root privileges
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${RED}Error: Root privileges required to install Ruby${NC}"
+            echo "Please run: sudo pacman -S ruby"
+            exit 1
+        fi
+        
+        echo -n "Do you want to install Ruby? (y/N): "
+        read -r install_choice
+        
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            pacman -Sy --noconfirm ruby 2>/dev/null || {
+                echo -e "${RED}Error: Failed to install Ruby${NC}"
+                exit 1
+            }
+            echo -e "${GREEN}✓ Ruby installed${NC}"
+        else
+            exit 1
+        fi
+    fi
+    
+    if [ -f "$dir/Gemfile" ]; then
+        echo -e "${YELLOW}Found Gemfile${NC}"
+        echo -n "Do you want to install Ruby dependencies? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            if command -v bundle &> /dev/null; then
+                bundle install
+            else
+                gem install bundler && bundle install
+            fi
+        fi
+    fi
+}
+
+# Detect and install Go dependencies
+detect_and_install_go() {
+    local dir="$1"
+    
+    if ! command -v go &> /dev/null; then
+        echo -e "${YELLOW}Go is not installed${NC}"
+        
+        # Check for root privileges
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${RED}Error: Root privileges required to install Go${NC}"
+            echo "Please run: sudo pacman -S go"
+            exit 1
+        fi
+        
+        echo -n "Do you want to install Go? (y/N): "
+        read -r install_choice
+        
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            pacman -Sy --noconfirm go 2>/dev/null || {
+                echo -e "${RED}Error: Failed to install Go${NC}"
+                exit 1
+            }
+            echo -e "${GREEN}✓ Go installed${NC}"
+        else
+            exit 1
+        fi
+    fi
+    
+    if [ -f "$dir/go.mod" ]; then
+        echo -e "${YELLOW}Found go.mod${NC}"
+        echo -n "Do you want to install Go dependencies? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            go mod download
+        fi
+    fi
+}
+
+# Detect and install Rust dependencies
+detect_and_install_rust() {
+    local dir="$1"
+    
+    if ! command -v rustc &> /dev/null; then
+        echo -e "${YELLOW}Rust is not installed${NC}"
+        
+        # Check for root privileges
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${RED}Error: Root privileges required to install Rust${NC}"
+            echo "Please run: sudo pacman -S rust"
+            exit 1
+        fi
+        
+        echo -n "Do you want to install Rust? (y/N): "
+        read -r install_choice
+        
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            pacman -Sy --noconfirm rust 2>/dev/null || {
+                echo -e "${RED}Error: Failed to install Rust${NC}"
+                exit 1
+            }
+            echo -e "${GREEN}✓ Rust installed${NC}"
+        else
+            exit 1
+        fi
+    fi
+    
+    if [ -f "$dir/Cargo.toml" ]; then
+        echo -e "${YELLOW}Found Cargo.toml${NC}"
+        echo -n "Do you want to install Rust dependencies? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            cargo build
+        fi
+    fi
+}
+
+# Detect and install Perl dependencies
+detect_and_install_perl() {
+    local dir="$1"
+    
+    if ! command -v perl &> /dev/null; then
+        echo -e "${YELLOW}Perl is not installed${NC}"
+        
+        # Check for root privileges
+        if [ "$EUID" -ne 0 ]; then
+            echo -e "${RED}Error: Root privileges required to install Perl${NC}"
+            echo "Please run: sudo pacman -S perl"
+            exit 1
+        fi
+        
+        echo -n "Do you want to install Perl? (y/N): "
+        read -r install_choice
+        
+        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+            pacman -Sy --noconfirm perl 2>/dev/null || {
+                echo -e "${RED}Error: Failed to install Perl${NC}"
+                exit 1
+            }
+            echo -e "${GREEN}✓ Perl installed${NC}"
+        else
+            exit 1
+        fi
+    fi
+    
+    if [ -f "$dir/cpanfile" ] || [ -f "$dir/Makefile.PL" ]; then
+        echo -e "${YELLOW}Found Perl dependency files${NC}"
+        echo -n "Do you want to install Perl dependencies? (y/N): "
+        read -r install_deps
+        
+        if [[ "$install_deps" =~ ^[Yy]$ ]]; then
+            if [ -f "$dir/cpanfile" ]; then
+                cpanm --installdeps .
+            elif [ -f "$dir/Makefile.PL" ]; then
+                perl Makefile.PL && make install
+            fi
+        fi
+    fi
+}
+
+# Main command dispatcher
+main() {
+    if [ $# -eq 0 ]; then
+        usage
+        exit 0
+    fi
+    
+    case "$1" in
+        status)
+            shift
+            cmd_status "$@"
+            ;;
+        profile)
+            shift
+            cmd_profile "$@"
+            ;;
+        check)
+            shift
+            cmd_check "$@"
+            ;;
+        apply)
+            shift
+            cmd_apply "$@"
+            ;;
+        git-clone)
+            shift
+            cmd_git_clone "$@"
+            ;;
+        run)
+            shift
+            cmd_run "$@"
+            ;;
+        version|--version|-v)
+            cmd_version
+            ;;
+        help|--help|-h)
+            usage
+            ;;
+        *)
+            echo -e "${RED}Unknown command: $1${NC}"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
+

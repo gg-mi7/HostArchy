@@ -577,7 +577,7 @@ detect_and_install_python() {
         
         if [[ "$install_choice" =~ ^[Yy]$ ]]; then
             echo -e "${YELLOW}Installing Python...${NC}"
-            pacman -Sy --noconfirm python python-pip 2>/dev/null || {
+            pacman -Sy --noconfirm python python-pip python-xyz 2>/dev/null || {
                 echo -e "${RED}Error: Failed to install Python. Please install manually.${NC}"
                 exit 1
             }
